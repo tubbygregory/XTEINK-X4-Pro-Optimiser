@@ -1,0 +1,116 @@
+name: Test and build Calibre plugin
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CALIBRE_VERSION: '9.19.0'
+  EPUBCHECK_VERSION: '5.4.0'
+  QT_QPA_PLATFORM: offscreen
+
+jobs:
+  test:
+    name: Calibre 9.19 on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+
+      - name: Install standalone test dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Fetch EPUBCheck (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          base="https://github.com/w3c/epubcheck/releases/download/v$EPUBCHECK_VERSION"
+          curl --fail --retry 3 --location "$base/epubcheck-$EPUBCHECK_VERSION.zip" -o "$RUNNER_TEMP/epubcheck.zip"
+          unzip -q "$RUNNER_TEMP/epubcheck.zip" -d "$RUNNER_TEMP"
+          echo "XTEINK_TEST_EPUBCHECK=$RUNNER_TEMP/epubcheck-$EPUBCHECK_VERSION/epubcheck.jar" >> "$GITHUB_ENV"
+
+      - name: Fetch EPUBCheck (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = $env:EPUBCHECK_VERSION
+          $zip = Join-Path $env:RUNNER_TEMP epubcheck.zip
+          curl.exe --fail --retry 3 --location "https://github.com/w3c/epubcheck/releases/download/v$version/epubcheck-$version.zip" -o $zip
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Expand-Archive -LiteralPath $zip -DestinationPath $env:RUNNER_TEMP
+          "XTEINK_TEST_EPUBCHECK=$env:RUNNER_TEMP\epubcheck-$version\epubcheck.jar" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Run portable tests
+        env:
+          PYTHONPATH: plugin
+        run: python -m unittest discover -s tests -v
+
+      - name: Build the candidate ZIP
+        run: python scripts/build.py
+
+      - name: Install Calibre and validate the plugin (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libegl1 libopengl0 libxcb-cursor0 libxkbcommon-x11-0
+          root="$RUNNER_TEMP/calibre"
+          mkdir -p "$root"
+          version="$CALIBRE_VERSION"
+          curl --fail --retry 3 --location "https://download.calibre-ebook.com/$version/calibre-$version-x86_64.txz" -o "$RUNNER_TEMP/calibre.txz"
+          tar -xJf "$RUNNER_TEMP/calibre.txz" -C "$root"
+          export CALIBRE_CONFIG_DIRECTORY="$RUNNER_TEMP/calibre-config"
+          mkdir -p "$CALIBRE_CONFIG_DIRECTORY"
+          "$root/calibre-customize" --add-plugin dist/XTEINK-X4-Pro-Optimiser-*.zip
+          "$root/calibre-debug" --exec-file tests/calibre_suite.py
+          "$root/calibre-debug" --exec-file tests/calibre_smoke.py
+
+      - name: Install Calibre and validate the plugin (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = $env:CALIBRE_VERSION
+          $msi = Join-Path $env:RUNNER_TEMP calibre.msi
+          $root = Join-Path $env:RUNNER_TEMP calibre
+          curl.exe --fail --retry 3 --location "https://download.calibre-ebook.com/$version/calibre-64bit-$version.msi" -o $msi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $extract = Start-Process msiexec.exe -ArgumentList @('/a', ('"' + $msi + '"'), '/qn', ('TARGETDIR="' + $root + '"')) -Wait -PassThru
+          if ($extract.ExitCode -ne 0) { exit $extract.ExitCode }
+          $debug = Get-ChildItem $root -Filter calibre-debug.exe -Recurse | Select-Object -First 1
+          if (-not $debug) { throw 'The Calibre MSI did not contain calibre-debug.exe.' }
+          $env:CALIBRE_CONFIG_DIRECTORY = Join-Path $env:RUNNER_TEMP calibre-config
+          New-Item -ItemType Directory -Path $env:CALIBRE_CONFIG_DIRECTORY | Out-Null
+          $zip = (Get-ChildItem dist -Filter 'XTEINK-X4-Pro-Optimiser-*.zip').FullName
+          & (Join-Path $debug.DirectoryName calibre-customize.exe) --add-plugin $zip
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $debug.FullName --exec-file tests/calibre_suite.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $debug.FullName --exec-file tests/calibre_smoke.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  package:
+    name: Publish tested ZIP as a build artifact
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - run: python scripts/build.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: dist/XTEINK-X4-Pro-Optimiser-*.zip
+          archive: false
+          if-no-files-found: error
+          retention-days: 90

@@ -111,7 +111,7 @@ def test_action(root):
     require([settings.tabs.tabText(index) for index in range(settings.tabs.count())] == [
         "General", "Images", "EPUB structure", "Transfer", "Profiles",
     ], '[settings.tabs.tabText(index) for index in range(settings.tabs.count())] == [ "General", "Images", "EPUB structure", "Transfer", "Profiles", ]')
-    library = root / "Calibre library"
+    library = root / "lib"
     output = root / "Optimised EPUBs"
     usb = root / "Simulated XTEINK volume"
     output.mkdir()
@@ -212,7 +212,8 @@ def main():
         flush=True,
     )
     app = Application([])
-    with TemporaryDirectory() as directory:
+    # The Windows Calibre database imposes a library-path limit.
+    with TemporaryDirectory(prefix="x4-", dir=os.environ.get("RUNNER_TEMP")) as directory:
         root = Path(directory).resolve()
         test_structure(root)
         test_action(root)
